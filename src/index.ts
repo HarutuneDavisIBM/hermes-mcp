@@ -73,7 +73,9 @@ server.registerTool(
   "hermes_search",
   {
     description:
-      "Search documents in Hermes using full-text search. Returns matching published documents with titles, owners, product areas, and document types.",
+      "Search documents in Hermes using full-text search. Returns matching published documents with titles, owners, product areas, and document types. " +
+      "Each result contains an 'objectID' field (a SharePoint GUID like '01XOO7K4...') — pass that value to hermes_get_document to fetch full metadata. " +
+      "Do NOT pass the human-readable 'docNumber' (e.g. 'RFC-123') to hermes_get_document; it will return 404.",
     inputSchema: z.object({
       query: z.string().describe("Search query text"),
       doc_type: z
@@ -148,9 +150,15 @@ server.registerTool(
   "hermes_get_document",
   {
     description:
-      "Get full metadata for a specific Hermes document by its ID (e.g. 'RFC-123'). Returns title, status, approvers, summary, custom fields, and links.",
+      "Get full metadata for a specific Hermes document by its SharePoint objectID. Returns title, status, approvers, summary, custom fields, and links. " +
+      "IMPORTANT: The document_id must be the 'objectID' field from hermes_search results (a SharePoint GUID like '01XOO7K4...'), " +
+      "NOT the human-readable docNumber like 'RFC-123' or 'HVS-022' — those will return a 404. " +
+      "Always call hermes_search first to obtain the objectID, then pass it here.",
     inputSchema: z.object({
-      document_id: z.string().describe("Document ID, e.g. 'RFC-123' or 'PRD-45'"),
+      document_id: z.string().describe(
+        "The SharePoint objectID of the document — a GUID string like '01XOO7K4NVWSKOYH3XMVB3TF54U4DNOEC5'. " +
+        "Found in the 'objectID' field of hermes_search results. Do NOT use docNumber (e.g. 'RFC-123')."
+      ),
     }),
   },
   async ({ document_id }) => {
