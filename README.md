@@ -75,8 +75,8 @@ If you get an authentication error, your session cookie has likely expired — r
 
 | Tool | Description |
 |---|---|
-| `hermes_search` | Full-text search across all published documents. Supports optional `doc_type` and `product` filters. |
-| `hermes_get_document` | Fetch full metadata and content for a specific document by ID (e.g. `RFC-123`). |
+| `hermes_search` | Full-text search across all published documents. Supports optional `doc_type` and `product` filters. Each result includes an `objectID` field — use that with `hermes_get_document`. |
+| `hermes_get_document` | Fetch full metadata for a document by its **SharePoint `objectID`** (e.g. `01XOO7K4...`), found in `hermes_search` results. **Not** the human-readable doc number like `RFC-123`. |
 | `hermes_list_drafts` | List draft documents. Optionally filter by owner email. |
 | `hermes_list_document_types` | List all document types configured in the instance (RFC, PRD, FRD, ADR, etc.) with their schemas and custom fields. |
 | `hermes_list_products` | List all products and areas configured in the instance. Useful to know valid filter values for `hermes_search`. |
@@ -89,7 +89,7 @@ Once connected, you can ask your AI assistant things like:
 
 - *"Search Hermes for RFCs about Vault authentication"*
 - *"Find all PRDs related to the HCP platform"*
-- *"Get the document RFC-42"*
+- *"Search for the document HVS-022 and get its full metadata"*
 - *"List all draft documents owned by me"*
 - *"What products are in Hermes?"*
 - *"Show me projects related to Terraform"*
