@@ -94,6 +94,8 @@ pkill -f "hermes-mcp/build/index.js"
 
 ## Available Tools
 
+### Read operations
+
 | Tool | Description |
 |---|---|
 | `hermes_search` | Full-text search across all published documents. Supports optional `doc_type` and `product` filters. Each result includes an `objectID` field — use that with `hermes_get_document`. |
@@ -103,6 +105,24 @@ pkill -f "hermes-mcp/build/index.js"
 | `hermes_list_products` | List all products and areas configured in the instance. Useful to know valid filter values for `hermes_search`. |
 | `hermes_list_projects` | List projects that group related documents together. |
 | `hermes_me` | Get the currently authenticated user's profile. Use this to verify your session cookie is working. |
+
+### Write operations
+
+| Tool | Description |
+|---|---|
+| `hermes_create_draft` | Create a new document draft (WIP status). Requires `title` and `doc_type`. Returns the new document's SharePoint objectID. |
+| `hermes_update_draft` | Update a draft's metadata — title, summary, product, contributors, approvers, approver groups, owners, and custom fields. Only provided fields are changed. |
+| `hermes_update_document` | Update a **published** document's metadata or status. Supported statuses: `In-Review`, `Approved`, `Obsolete`. Also updates title, summary, owners, contributors, approvers, approver groups, and custom fields. |
+| `hermes_request_review` | Publish a draft and move it to `In-Review` status, notifying assigned approvers. The draft must have at least one approver set before calling this. |
+| `hermes_approve_document` | Approve a document as the currently authenticated user. The document must be `In-Review` or `Approved` and the current user must be listed as an approver. |
+
+### Typical workflow
+
+1. **Create** — `hermes_create_draft` → get a document ID
+2. **Edit** — `hermes_update_draft` (add title, summary, product, approvers, custom fields)
+3. **Publish** — `hermes_request_review` (moves to `In-Review`, emails approvers)
+4. **Approve** — `hermes_approve_document` (called by each approver)
+5. **Mark obsolete** — `hermes_update_document` with `status: "Obsolete"`
 
 ### Example prompts
 
@@ -114,6 +134,10 @@ Once connected, you can ask your AI assistant things like:
 - *"List all draft documents owned by me"*
 - *"What products are in Hermes?"*
 - *"Show me projects related to Terraform"*
+- *"Create a new RFC draft titled 'Improving Agent Authentication' for the Vault product"*
+- *"Add jane@example.com as an approver on my draft RFC-??? and request review"*
+- *"Mark document 01XOO7K4... as Obsolete"*
+- *"Approve the document 01XOO7K4..."*
 
 ## Environment Variables
 

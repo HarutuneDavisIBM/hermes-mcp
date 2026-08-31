@@ -168,7 +168,8 @@ server.registerTool(
   "hermes_list_drafts",
   {
     description:
-      "List draft documents in Hermes. Returns documents that are in draft/review state, not yet published.",
+      "List draft documents in Hermes. Returns documents that are in WIP (work-in-progress) status. " +
+      "Optionally filter by owner email address.",
     inputSchema: z.object({
       owner: z
         .string()
@@ -178,10 +179,60 @@ server.registerTool(
   },
   async ({ owner }) => {
     try {
-      const params = owner ? `?owner=${encodeURIComponent(owner)}` : "";
-      const data = await hermesJson<unknown>(`/api/v2/drafts${params}`);
+      // The /api/v2/drafts REST endpoint is broken on this deployment (always 500).
+      // Fall back to querying the Algolia 'drafts' index directly, then filter
+      // by owner client-side (the owners field is not facetable in Algolia).
+      const PAGE_SIZE = 200; // Algolia max per request
+      let page = 0;
+      let totalPages = 1;
+      const hits: unknown[] = [];
+
+      do {
+        const body = { query: "", hitsPerPage: PAGE_SIZE, page };
+        const data = await hermesJson<{ hits: unknown[]; nbHits: number; nbPages: number }>(
+          "/1/indexes/drafts/query",
+          { method: "POST", body: JSON.stringify(body) }
+        );
+        totalPages = data.nbPages;
+        hits.push(...data.hits);
+        page++;
+        // Stop early once we have enough results (avoid scanning all 3000+ drafts
+        // when no owner filter is set — cap at first 5 pages = 1000 docs).
+        if (!owner && page >= 5) break;
+      } while (page < totalPages);
+
+      // Filter by owner if requested (case-insensitive).
+      const ownerLower = owner?.toLowerCase();
+      const filtered = ownerLower
+        ? hits.filter((h) => {
+            const owners = (h as Record<string, unknown>).owners;
+            if (Array.isArray(owners)) {
+              return owners.some(
+                (o) => typeof o === "string" && o.toLowerCase() === ownerLower
+              );
+            }
+            return false;
+          })
+        : hits;
+
+      // Strip _highlightResult noise from each hit.
+      const clean = filtered.map((h) => {
+        const { _highlightResult, ...rest } = h as Record<string, unknown>;
+        void _highlightResult;
+        return rest;
+      });
+
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { total: clean.length, drafts: clean },
+              null,
+              2
+            ),
+          },
+        ],
       };
     } catch (err) {
       return {
@@ -285,6 +336,396 @@ server.registerTool(
     } catch (err) {
       return {
         content: [{ type: "text" as const, text: `Failed to get current user: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: create draft ────────────────────────────────────────────────────────
+server.registerTool(
+  "hermes_create_draft",
+  {
+    description:
+      "Create a new document draft in Hermes. Returns the new document's ID which can be used with other tools. " +
+      "The draft will have WIP (work-in-progress) status until published via hermes_request_review.",
+    inputSchema: z.object({
+      title: z.string().describe("Document title (required)"),
+      doc_type: z
+        .string()
+        .describe(
+          "Document type abbreviation, e.g. 'RFC', 'PRD', 'FRD', 'ADR', 'Memo', 'PRFAQ'. " +
+          "Use hermes_list_document_types to see all available types."
+        ),
+      product: z
+        .string()
+        .optional()
+        .describe("Product or area name. Use hermes_list_products for valid values."),
+      product_abbreviation: z
+        .string()
+        .optional()
+        .describe("Short product abbreviation used as the doc number prefix, e.g. 'HVS', 'TF'. Falls back to 'TODO' if omitted."),
+      summary: z
+        .string()
+        .optional()
+        .describe("Short summary or abstract of the document"),
+      contributors: z
+        .array(z.string())
+        .optional()
+        .describe("List of contributor email addresses"),
+    }),
+  },
+  async ({ title, doc_type, product, product_abbreviation, summary, contributors }) => {
+    try {
+      const body: Record<string, unknown> = { title, docType: doc_type };
+      if (product) body.product = product;
+      if (product_abbreviation) body.productAbbreviation = product_abbreviation;
+      if (summary) body.summary = summary;
+      if (contributors && contributors.length > 0) body.contributors = contributors;
+
+      const data = await hermesJson<{ id: string }>("/api/v2/drafts", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Failed to create draft: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: update draft ────────────────────────────────────────────────────────
+server.registerTool(
+  "hermes_update_draft",
+  {
+    description:
+      "Update a document draft in Hermes (WIP status only). Supports updating title, summary, product, " +
+      "contributors, approvers, approver groups, and custom fields. All fields are optional — only provided " +
+      "fields are changed. The document_id must be the SharePoint objectID from hermes_list_drafts or hermes_create_draft.",
+    inputSchema: z.object({
+      document_id: z.string().describe(
+        "SharePoint objectID of the draft to update (from hermes_list_drafts or hermes_create_draft)"
+      ),
+      title: z.string().optional().describe("New title for the document"),
+      summary: z.string().optional().describe("New summary or abstract"),
+      product: z.string().optional().describe("New product or area name"),
+      contributors: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of contributor email addresses (replaces existing)"),
+      approvers: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of approver email addresses (replaces existing)"),
+      approver_groups: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of approver group names (replaces existing)"),
+      owners: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of owner email addresses (replaces existing)"),
+      custom_fields: z
+        .array(
+          z.object({
+            name: z.string().describe(
+              "Camel-case internal key for the custom field as returned by hermes_get_document " +
+              "under 'customEditableFields' (e.g. 'currentVersion', 'prd', 'stakeholders'). " +
+              "Do NOT use the display name here."
+            ),
+            value: z.unknown().describe("Custom field value"),
+            type: z.string().optional().describe(
+              "Custom field type — MUST be uppercase as returned by the API: 'STRING' or 'PEOPLE'. " +
+              "Lowercase values ('string', 'people') are rejected with a 400 error."
+            ),
+            display_name: z.string().optional().describe(
+              "Human-readable label for the field as shown in the UI " +
+              "(e.g. 'Current Version', 'PRD', 'Stakeholders'). " +
+              "Matches the 'displayName' in hermes_get_document customEditableFields."
+            ),
+          })
+        )
+        .optional()
+        .describe(
+          "Custom fields specific to the document type. " +
+          "IMPORTANT: 'name' must be the camelCase key (e.g. 'currentVersion'), " +
+          "'type' must be uppercase (e.g. 'STRING', 'PEOPLE'), and " +
+          "'display_name' must match the displayName from the API exactly. " +
+          "Call hermes_get_document on an existing doc or hermes_list_document_types to discover valid keys and types."
+        ),
+    }),
+  },
+  async ({
+    document_id,
+    title,
+    summary,
+    product,
+    contributors,
+    approvers,
+    approver_groups,
+    owners,
+    custom_fields,
+  }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (title !== undefined) body.title = title;
+      if (summary !== undefined) body.summary = summary;
+      if (product !== undefined) body.product = product;
+      if (contributors !== undefined) body.contributors = contributors;
+      if (approvers !== undefined) body.approvers = approvers;
+      if (approver_groups !== undefined) body.approverGroups = approver_groups;
+      if (owners !== undefined) body.owners = owners;
+      if (custom_fields !== undefined) {
+        body.customFields = custom_fields.map((cf) => ({
+          name: cf.name,
+          value: cf.value,
+          ...(cf.type && { type: cf.type }),
+          ...(cf.display_name && { displayName: cf.display_name }),
+        }));
+      }
+
+      const res = await hermesRequest(`/api/v2/drafts/${document_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(`Hermes API error ${res.status}: ${text}`);
+      }
+      const data = await res.json().catch(() => ({}));
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: true, document_id, ...data }, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Failed to update draft: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: update published document ──────────────────────────────────────────
+server.registerTool(
+  "hermes_update_document",
+  {
+    description:
+      "Update a published document's metadata in Hermes. Supports changing status (In-Review, Approved, Obsolete), " +
+      "title, summary, owners, contributors, approvers, approver groups, and custom fields. " +
+      "For drafts (WIP), use hermes_update_draft instead. " +
+      "Valid statuses: 'In-Review', 'Approved', 'Obsolete'.",
+    inputSchema: z.object({
+      document_id: z.string().describe(
+        "SharePoint objectID of the published document to update (from hermes_search or hermes_get_document)"
+      ),
+      status: z
+        .enum(["In-Review", "Approved", "Obsolete"])
+        .optional()
+        .describe(
+          "New document status. " +
+          "'In-Review' — document is under active review by approvers. " +
+          "'Approved' — document has been approved. " +
+          "'Obsolete' — document is no longer current."
+        ),
+      title: z.string().optional().describe("New document title"),
+      summary: z.string().optional().describe("New summary or abstract"),
+      owners: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of owner email addresses (replaces existing)"),
+      contributors: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of contributor email addresses (replaces existing)"),
+      approvers: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of approver email addresses (replaces existing)"),
+      approver_groups: z
+        .array(z.string())
+        .optional()
+        .describe("Updated list of approver group names (replaces existing)"),
+      custom_fields: z
+        .array(
+          z.object({
+            name: z.string().describe(
+              "Camel-case internal key for the custom field as returned by hermes_get_document " +
+              "under 'customEditableFields' (e.g. 'currentVersion', 'prd', 'stakeholders'). " +
+              "Do NOT use the display name here."
+            ),
+            value: z.unknown().describe("Custom field value"),
+            type: z.string().optional().describe(
+              "Custom field type — MUST be uppercase as returned by the API: 'STRING' or 'PEOPLE'. " +
+              "Lowercase values ('string', 'people') are rejected with a 400 error."
+            ),
+            display_name: z.string().optional().describe(
+              "Human-readable label for the field as shown in the UI " +
+              "(e.g. 'Current Version', 'PRD', 'Stakeholders'). " +
+              "Matches the 'displayName' in hermes_get_document customEditableFields."
+            ),
+          })
+        )
+        .optional()
+        .describe(
+          "Custom fields specific to the document type. " +
+          "IMPORTANT: 'name' must be the camelCase key (e.g. 'currentVersion'), " +
+          "'type' must be uppercase (e.g. 'STRING', 'PEOPLE'), and " +
+          "'display_name' must match the displayName from the API exactly. " +
+          "Call hermes_get_document on an existing doc or hermes_list_document_types to discover valid keys and types."
+        ),
+    }),
+  },
+  async ({
+    document_id,
+    status,
+    title,
+    summary,
+    owners,
+    contributors,
+    approvers,
+    approver_groups,
+    custom_fields,
+  }) => {
+    try {
+      const body: Record<string, unknown> = {};
+      if (status !== undefined) body.status = status;
+      if (title !== undefined) body.title = title;
+      if (summary !== undefined) body.summary = summary;
+      if (owners !== undefined) body.owners = owners;
+      if (contributors !== undefined) body.contributors = contributors;
+      if (approvers !== undefined) body.approvers = approvers;
+      if (approver_groups !== undefined) body.approverGroups = approver_groups;
+      if (custom_fields !== undefined) {
+        body.customFields = custom_fields.map((cf) => ({
+          name: cf.name,
+          value: cf.value,
+          ...(cf.type && { type: cf.type }),
+          ...(cf.display_name && { displayName: cf.display_name }),
+        }));
+      }
+
+      const res = await hermesRequest(`/api/v2/documents/${document_id}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(`Hermes API error ${res.status}: ${text}`);
+      }
+      const data = await res.json().catch(() => ({}));
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ success: true, document_id, ...data }, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Failed to update document: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: request review (publish draft) ─────────────────────────────────────
+server.registerTool(
+  "hermes_request_review",
+  {
+    description:
+      "Publish a draft document and request review from approvers. This moves the document from WIP " +
+      "status to 'In-Review' and notifies the assigned approvers. " +
+      "The draft must already have approvers set (use hermes_update_draft to add them first). " +
+      "The document_id must be the SharePoint objectID of a draft.",
+    inputSchema: z.object({
+      document_id: z.string().describe(
+        "SharePoint objectID of the draft to publish for review (from hermes_list_drafts or hermes_create_draft)"
+      ),
+    }),
+  },
+  async ({ document_id }) => {
+    try {
+      const res = await hermesRequest(`/api/v2/reviews/${document_id}`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(`Hermes API error ${res.status}: ${text}`);
+      }
+      const data = await res.json().catch(() => ({}));
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { success: true, document_id, message: "Document published and review requested", ...data },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Failed to request review: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+);
+
+// ── Tool: approve document ────────────────────────────────────────────────────
+server.registerTool(
+  "hermes_approve_document",
+  {
+    description:
+      "Approve a document in Hermes as the currently authenticated user. The document must be in " +
+      "'In-Review' or 'Approved' status. The current user must be listed as an approver on the document. " +
+      "Use hermes_get_document to check the current status and approver list before calling this.",
+    inputSchema: z.object({
+      document_id: z.string().describe(
+        "SharePoint objectID of the document to approve (from hermes_search or hermes_get_document)"
+      ),
+    }),
+  },
+  async ({ document_id }) => {
+    try {
+      const res = await hermesRequest(`/api/v2/documents/${document_id}/approvals`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => res.statusText);
+        throw new Error(`Hermes API error ${res.status}: ${text}`);
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              { success: true, document_id, message: "Document approved successfully" },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text" as const, text: `Failed to approve document: ${err instanceof Error ? err.message : String(err)}` }],
         isError: true,
       };
     }
