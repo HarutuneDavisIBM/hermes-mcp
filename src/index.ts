@@ -7,29 +7,22 @@ const HERMES_BASE_URL =
   process.env.HERMES_BASE_URL ||
   "https://hermes-sharepoint.hashicorp.services";
 
-// Hermes (SharePoint deployment) is fronted by an AWS ALB with OIDC.
-// The ALB forwards the authenticated user's JWT in the "x-amzn-oidc-data"
-// header. We pass that token along with every API request so Hermes can
-// identify us. Copy the value from DevTools → Network → any request →
-// Request Headers → x-amzn-oidc-data.
-const HERMES_TOKEN = process.env.HERMES_TOKEN;
-
-// Fallback: some deployments also accept a session cookie.
+// Hermes (SharePoint deployment) authenticates via an AWS ALB session cookie.
+// Log in at your Hermes URL, then open DevTools → Application → Cookies and
+// copy the AWSELBAuthSessionCookie-0 value (including the name prefix).
+// Set HERMES_COOKIE="AWSELBAuthSessionCookie-0=<value>" in your mcp.json env.
 const HERMES_COOKIE = process.env.HERMES_COOKIE;
 
-if (!HERMES_TOKEN && !HERMES_COOKIE) {
+if (!HERMES_COOKIE) {
   console.error(
-    "ERROR: Either HERMES_TOKEN or HERMES_COOKIE environment variable is required.\n\n" +
-    "To get HERMES_TOKEN (preferred):\n" +
+    "ERROR: HERMES_COOKIE environment variable is required.\n\n" +
+    "To get your session cookie:\n" +
     "  1. Log in to " + HERMES_BASE_URL + " in your browser\n" +
-    "  2. Open DevTools → Network tab, click any /api/ request\n" +
-    "  3. Copy the value of the 'x-amzn-oidc-data' request header\n" +
-    "  4. Set HERMES_TOKEN=<value> in your mcp.json env block\n\n" +
-    "To get HERMES_COOKIE (fallback):\n" +
-    "  1. Log in to " + HERMES_BASE_URL + " in your browser\n" +
-    "  2. Open DevTools → Application → Cookies\n" +
-    "  3. Copy all cookie values as a single string\n" +
-    "  4. Set HERMES_COOKIE=<value> in your mcp.json env block"
+    "  2. Open DevTools → Application tab → Cookies → select the site\n" +
+    "  3. Find the cookie named 'AWSELBAuthSessionCookie-0'\n" +
+    "  4. Copy the Name=Value pair: AWSELBAuthSessionCookie-0=<value>\n" +
+    "  5. Set HERMES_COOKIE=<that full string> in your mcp.json env block\n\n" +
+    "Note: This cookie expires after a few hours. Repeat these steps to refresh it."
   );
   process.exit(1);
 }
@@ -41,15 +34,9 @@ async function hermesRequest(
   const url = `${HERMES_BASE_URL}${path}`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    "Cookie": HERMES_COOKIE!,
     ...(options.headers as Record<string, string>),
   };
-
-  // Prefer ALB OIDC JWT header; fall back to cookie.
-  if (HERMES_TOKEN) {
-    headers["x-amzn-oidc-data"] = HERMES_TOKEN;
-  } else if (HERMES_COOKIE) {
-    headers["Cookie"] = HERMES_COOKIE;
-  }
 
   return fetch(url, { ...options, headers });
 }
