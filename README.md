@@ -27,9 +27,9 @@ Hermes (SharePoint deployment) authenticates via an AWS Application Load Balance
 
 1. Open your Hermes instance (e.g. `https://hermes-sharepoint.hashicorp.services`) and log in
 2. Open **DevTools** (`Cmd+Option+I` on Mac, `F12` on Windows)
-3. Go to the **Network** tab and click any `/api/v2/` request
-4. In **Request Headers**, find the `cookie` field
-5. Copy the value of `AWSELBAuthSessionCookie-0=...` (just that one cookie, including the name)
+3. Go to the **Application** tab → **Cookies** → select the site
+4. Find the cookie named `AWSELBAuthSessionCookie-0`
+5. Copy the **Name=Value** pair: `AWSELBAuthSessionCookie-0=<value>`
 
 > **Note:** This session cookie expires periodically (typically after a few hours). You will need to refresh it by repeating the steps above.
 
@@ -55,21 +55,42 @@ Add the server to your MCP client's config file. For Bob, this is `~/.bob/settin
 Replace:
 - `/absolute/path/to/hermes-mcp` with the actual path where you cloned this repo
 - `https://your-hermes-instance.example.com` with your Hermes URL
-- `<your-session-cookie-value>` with the cookie value from DevTools
+- `AWSELBAuthSessionCookie-0=<your-session-cookie-value>` with the full Name=Value pair from DevTools
 
 ### Verify the connection
 
-After saving the config, ask your AI assistant to run `hermes_me`. A successful response looks like:
+After saving the config, restart the MCP server and ask your AI assistant to run `hermes_me`. A successful response looks like:
 
 ```json
-{
-  "id": "...",
-  "email": "you@example.com",
-  "name": "Your Name"
-}
+{ "operation": "login" }
 ```
 
-If you get an authentication error, your session cookie has likely expired — repeat the [steps above](#how-to-get-your-session-cookie) to get a fresh one.
+If you get an authentication error (`Unexpected token '<'` or similar), your session cookie has expired — repeat the [steps above](#how-to-get-your-session-cookie) to get a fresh one.
+
+## Refreshing Your Session Cookie
+
+Session cookies expire after a few hours. When tools start returning authentication errors:
+
+1. Log in to your Hermes instance in the browser
+2. Open DevTools → **Application** tab → **Cookies** → select the site
+3. Find `AWSELBAuthSessionCookie-0` and copy the full `Name=Value` string
+4. Update `HERMES_COOKIE` in your `mcp.json` using a safe JSON edit (not string replace — the value contains special characters):
+
+```bash
+node -e "
+const fs = require('fs');
+const p = require('os').homedir() + '/.bob/settings/mcp.json';
+const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+c.mcpServers.hermes.env.HERMES_COOKIE = 'AWSELBAuthSessionCookie-0=<new-value>';
+fs.writeFileSync(p, JSON.stringify(c, null, 2));
+"
+```
+
+5. Kill the old process so it restarts with the new cookie:
+
+```bash
+pkill -f "hermes-mcp/build/index.js"
+```
 
 ## Available Tools
 
@@ -99,10 +120,7 @@ Once connected, you can ask your AI assistant things like:
 | Variable | Required | Description |
 |---|---|---|
 | `HERMES_BASE_URL` | No | Base URL of your Hermes instance. Defaults to `https://hermes-sharepoint.hashicorp.services` |
-| `HERMES_COOKIE` | Yes* | Full cookie string including name, e.g. `AWSELBAuthSessionCookie-0=...` |
-| `HERMES_TOKEN` | Yes* | ALB OIDC JWT token via `x-amzn-oidc-data` header (alternative to cookie) |
-
-\* At least one of `HERMES_COOKIE` or `HERMES_TOKEN` is required.
+| `HERMES_COOKIE` | **Yes** | Full cookie Name=Value string: `AWSELBAuthSessionCookie-0=<value>` |
 
 ## Development
 
@@ -118,17 +136,6 @@ npm run build
 ```
 
 The source is a single file: [`src/index.ts`](src/index.ts).
-
-## Refreshing Your Session Cookie
-
-Session cookies expire. When tools start returning authentication errors, grab a fresh cookie:
-
-1. Log in to your Hermes instance in the browser
-2. Open DevTools → Network → any `/api/v2/` request → Request Headers → `cookie`
-3. Copy the `AWSELBAuthSessionCookie-0=...` value
-4. Update `HERMES_COOKIE` in your `mcp.json`
-
-Your MCP client will pick up the new value on the next request (no restart needed for most clients).
 
 ## Contributing
 
